@@ -2,6 +2,7 @@ import { useRef, useState, useEffect } from 'react'
 import { ScanText, Copy, Check } from 'lucide-react'
 import { usePdfStore } from '../store/usePdfStore'
 import { createWorker } from 'tesseract.js'
+import { tesseractOptions } from '../utils/tesseractPaths'
 import { OCR_LANGUAGES } from '../utils/ocrUtils'
 
 interface Props { onClose: () => void }
@@ -89,7 +90,7 @@ export default function OcrRegionDialog({ onClose }: Props) {
       const crop = document.createElement('canvas')
       crop.width  = sel.w; crop.height = sel.h
       crop.getContext('2d')!.drawImage(canvas, sel.x, sel.y, sel.w, sel.h, 0, 0, sel.w, sel.h)
-      const worker = await createWorker(language)
+      const worker = await createWorker(language, 1, tesseractOptions())
       const { data } = await worker.recognize(crop)
       await worker.terminate()
       setResult(data.text.trim())

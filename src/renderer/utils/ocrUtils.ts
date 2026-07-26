@@ -1,4 +1,5 @@
 import { createWorker } from 'tesseract.js'
+import { tesseractOptions } from './tesseractPaths'
 import type { PDFDocumentProxy } from 'pdfjs-dist'
 
 export interface OcrWord {
@@ -91,6 +92,7 @@ export async function runOcrOnPages(
   signal?: AbortSignal
 ): Promise<void> {
   const worker = await createWorker(language, 1, {
+    ...tesseractOptions(),
     logger: (m: { status: string; progress: number }) => {
       if (m.status === 'recognizing text') {
         onProgress(-1, pageNums.length, m.progress)
