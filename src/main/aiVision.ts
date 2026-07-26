@@ -18,7 +18,6 @@ export const VISION_SYSTEM_TABLES =
 export interface VisionRequest {
   model: string
   max_tokens: number
-  temperature: number
   system: string
   messages: Array<{
     role: 'user'
@@ -33,7 +32,6 @@ export function buildVisionRequest(pngBase64: string, mode: VisionMode, model: s
   return {
     model,
     max_tokens: 4000,
-    temperature: 0,
     system: mode === 'tables' ? VISION_SYSTEM_TABLES : VISION_SYSTEM_TEXT,
     messages: [{
       role: 'user',
