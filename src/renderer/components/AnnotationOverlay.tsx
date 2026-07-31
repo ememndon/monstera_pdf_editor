@@ -6,6 +6,7 @@ import ContextMenu, { type ContextMenuEntry } from './ContextMenu'
 import { canvasToPdf, pdfToCanvas, newId } from '../utils/annotationUtils'
 import { loadPdfFont, bytesToBase64 } from '../utils/pdfFonts'
 import { logger } from '../utils/logger'
+import { copyText } from '../utils/copyText'
 import type {
   Annotation, HighlightAnn, InkAnn,
   ShapeAnn, TextBoxAnn, StickyNoteAnn, StampAnn, RedactAnn,
@@ -1289,9 +1290,7 @@ export default function AnnotationOverlay({ pageNum, scale, pageW, pageH }: Prop
   const buildTextMenuItems = (): ContextMenuEntry[] => {
     const txt = window.getSelection()?.toString() ?? ''
     return [
-      { label: 'Copy', action: () => {
-        try { navigator.clipboard.writeText(txt) } catch { try { document.execCommand('copy') } catch { /* ignore */ } }
-      } },
+      { label: 'Copy', action: () => { void copyText(txt) } },
       'separator',
       { label: 'Highlight', action: () => commitTextSelection('highlight') },
       { label: 'Underline', action: () => commitTextSelection('underline') },

@@ -4,6 +4,7 @@ import { usePdfStore } from '../store/usePdfStore'
 import { createWorker } from 'tesseract.js'
 import { tesseractOptions } from '../utils/tesseractPaths'
 import { OCR_LANGUAGES } from '../utils/ocrUtils'
+import { copyText } from '../utils/copyText'
 
 interface Props { onClose: () => void }
 
@@ -115,8 +116,8 @@ export default function OcrRegionDialog({ onClose }: Props) {
     onClose()
   }
 
-  const copyText = () => {
-    navigator.clipboard.writeText(result)
+  const handleCopy = async () => {
+    await copyText(result)
     setCopyDone(true)
     setTimeout(() => setCopyDone(false), 1500)
   }
@@ -159,7 +160,7 @@ export default function OcrRegionDialog({ onClose }: Props) {
           <button className="modal-btn-secondary" onClick={onClose}>Close</button>
           {result && (
             <>
-              <button className="modal-btn-secondary" onClick={copyText}>
+              <button className="modal-btn-secondary" onClick={handleCopy}>
                 {copyDone ? <><Check size={14} /> Copied</> : <><Copy size={14} /> Copy Text</>}
               </button>
               <button className="modal-btn-secondary" onClick={insertAsAnnotation}>

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog, Menu, shell, utilityProcess, safeStorage } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, Menu, shell, utilityProcess, safeStorage, clipboard } from 'electron'
 import path from 'path'
 import fs from 'fs'
 import * as nativeBins from './nativeBins'
@@ -2343,6 +2343,17 @@ ipcMain.handle('convert:csvToPdf', async (_event, csvText: string): Promise<Arra
 ipcMain.handle('shell:openEmail', async (_event, recipient: string, subject: string, body: string) => {
   const mailto = `mailto:${encodeURIComponent(recipient)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`
   await shell.openExternal(mailto)
+})
+
+// ── Clipboard ────────────────────────────────────────────────────────────────
+// navigator.clipboard.writeText() needs the clipboard-sanitized-write
+// permission, which our permission handler denies (it allows only 'media'), so
+// every in-app copy failed with "Write permission denied". Electron's native
+// clipboard module is not gated by the web permission model, so route copies
+// through here instead of loosening the handler.
+
+ipcMain.handle('clipboard:writeText', async (_event, text: string) => {
+  clipboard.writeText(String(text ?? ''))
 })
 
 // ── Export page for external editing ─────────────────────────────────────────

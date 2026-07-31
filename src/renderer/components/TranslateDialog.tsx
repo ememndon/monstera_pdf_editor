@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { Globe, X, ArrowLeft, ArrowRight, Download } from 'lucide-react'
 import { usePdfStore } from '../store/usePdfStore'
+import { copyText } from '../utils/copyText'
 
 const LANGUAGES = [
   { code: 'es', name: 'Spanish' }, { code: 'fr', name: 'French' },
@@ -100,7 +101,7 @@ export default function TranslateDialog({ onClose }: { onClose: () => void }) {
     }
   }
 
-  const handleCopy = async (text: string) => { await navigator.clipboard.writeText(text) }
+  const handleCopy = async (text: string) => { await copyText(text) }
 
   const handleSave = async (text: string, suffix: string) => {
     const blob = new Blob([text], { type: 'text/plain' })

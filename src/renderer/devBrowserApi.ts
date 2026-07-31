@@ -131,6 +131,8 @@ export function installBrowserApi() {
     },
     chooseDirectory: async () => 'browser://downloads',
 
+    clipboardWriteText: async (text: string) => { await navigator.clipboard.writeText(text) },
+
     readFileBytes: async (filePath: string) => {
       const f = fileStore.get(filePath)
       if (f) return await f.arrayBuffer()

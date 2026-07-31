@@ -2,6 +2,7 @@ import { useMemo } from 'react'
 import { ClipboardList, Copy, Download } from 'lucide-react'
 import { usePdfStore } from '../store/usePdfStore'
 import type { Annotation } from '../types/annotations'
+import { copyText } from '../utils/copyText'
 
 const TYPE_LABELS: Record<string, string> = {
   highlight: 'Highlight', underline: 'Underline', strikethrough: 'Strikethrough',
@@ -66,7 +67,7 @@ export default function SummarizeCommentsDialog({ onClose }: Props) {
   }
 
   const copyToClipboard = async () => {
-    await navigator.clipboard.writeText(buildReport())
+    await copyText(buildReport())
   }
 
   const saveToFile = async () => {

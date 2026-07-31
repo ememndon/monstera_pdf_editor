@@ -13,6 +13,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   chooseDirectory: (): Promise<string | null> =>
     ipcRenderer.invoke('dialog:chooseDirectory'),
 
+  // Clipboard (native; the web Clipboard API is blocked by our permission handler)
+  clipboardWriteText: (text: string): Promise<void> =>
+    ipcRenderer.invoke('clipboard:writeText', text),
+
   // Read
   readFileBytes: (filePath: string): Promise<ArrayBuffer> =>
     ipcRenderer.invoke('file:readBytes', filePath),

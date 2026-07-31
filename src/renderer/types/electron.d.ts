@@ -9,6 +9,7 @@ declare global {
       saveFileDialog: (defaultPath: string) => Promise<string | null>
       chooseDirectory: () => Promise<string | null>
 
+      clipboardWriteText: (text: string) => Promise<void>
       readFileBytes: (filePath: string) => Promise<ArrayBuffer>
       getMimeType: (filePath: string) => Promise<string>
 

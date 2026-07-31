@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import StatusText from './StatusText'
 import { usePdfStore } from '../store/usePdfStore'
 import { readBarcodesFromCanvas, type BarcodeResult } from '../utils/barcodeRead'
+import { copyText } from '../utils/copyText'
 
 export default function BarcodeReadDialog({ onClose }: { onClose: () => void }) {
   const currentPage = usePdfStore(s => s.currentPage)
@@ -41,7 +42,7 @@ export default function BarcodeReadDialog({ onClose }: { onClose: () => void }) 
               <span style={{ fontSize: 10, color: 'var(--text-dim)', minWidth: 70 }}>{r.format}</span>
               <span style={{ flex: 1, fontSize: 13, wordBreak: 'break-all', color: 'var(--text-primary)' }}>{r.text}</span>
               <button className="modal-btn-secondary" style={{ fontSize: 11, padding: '2px 8px' }}
-                onClick={() => navigator.clipboard.writeText(r.text)}>Copy</button>
+                onClick={() => void copyText(r.text)}>Copy</button>
               {isUrl(r.text) && (
                 <button className="modal-btn-secondary" style={{ fontSize: 11, padding: '2px 8px' }}
                   onClick={() => window.electronAPI.binsOpenUrl(r.text.startsWith('http') ? r.text : 'https://' + r.text).catch(() => {})}>Open</button>
