@@ -673,6 +673,14 @@ export async function writeAnnotationsToPdf(
 
 // ── read ──────────────────────────────────────────────────────────────────────
 
+// PDF.js v6 moved the annotation text from `contents` to `contentsObj.str`.
+// Keep the old property as a fallback so an older build still reads.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function annContents(a: any): string {
+  const s = a?.contentsObj?.str ?? a?.contents
+  return typeof s === 'string' ? s : ''
+}
+
 export async function readAnnotationsFromPdf(
   pdfDoc: PDFDocumentProxy,
   numPages: number
@@ -691,9 +699,19 @@ export async function readAnnotationsFromPdf(
         const id = rawId.startsWith(NM_PREFIX)
           ? rawId.slice(NM_PREFIX.length)
           : newId()
+        // PDF.js v6 exposes the annotation text as contentsObj.str; the old
+        // `contents` string is gone. Reading the stale property returned
+        // undefined for every text-bearing annotation, so reopening a saved file
+        // silently emptied every typewriter, text box, sticky note and stamp.
+        const contents = annContents(a)
+        // /C is absent on our FreeText (it means background fill, not text
+        // colour), so fall back to the colour carried in the /DA string.
+        const daColor = (a as any).defaultAppearanceData?.fontColor
         const color = a.color
           ? rgb255ToHex(a.color.r, a.color.g, a.color.b)
-          : '#ffff00'
+          : daColor
+            ? rgb255ToHex(daColor[0], daColor[1], daColor[2])
+            : '#ffff00'
         const opacity = typeof a.opacity === 'number' ? a.opacity : 0.7
         const base = { id, pageNum, color, opacity, createdAt: Date.now() }
 
@@ -707,7 +725,7 @@ export async function readAnnotationsFromPdf(
             const quads: number[][] = []
             for (let i = 0; i + 7 < rawQ.length; i += 8) quads.push(rawQ.slice(i, i + 8))
             if (quads.length > 0)
-              result.push({ ...base, type, quads, selectedText: a.contents || '' } as any)
+              result.push({ ...base, type, quads, selectedText: contents } as any)
             break
           }
           case 'Ink': {
@@ -746,19 +764,23 @@ export async function readAnnotationsFromPdf(
             result.push({
               ...base, type: 'textbox',
               x: x1, y: y1, width: x2 - x1, height: y2 - y1,
-              text: a.contents || '',
+              text: contents,
               fontSize: (a as any).defaultAppearanceData?.fontSize ?? 12,
             })
             break
           }
           case 'Text': {
             const [x, y] = a.rect as number[]
-            result.push({ ...base, type: 'stickynote', x, y, text: a.contents || '' })
+            result.push({ ...base, type: 'stickynote', x, y, text: contents })
             break
           }
           case 'Stamp': {
             const [x1, y1, x2, y2] = a.rect as number[]
-            const sn = (a.name || 'Draft') as any
+            // The label lives in /Contents (we write it there). /Name is
+            // deliberately absent so no viewer substitutes its own artwork, and
+            // PDF.js does not surface it anyway, so reading a.name always gave
+            // 'Draft' and every reopened stamp turned into DRAFT.
+            const sn = (contents || (a as any).name || 'Draft') as any
             result.push({
               ...base, type: 'stamp',
               x: (x1 + x2) / 2, y: (y1 + y2) / 2,
@@ -778,11 +800,11 @@ export async function readAnnotationsFromPdf(
             for (let vi = 0; vi + 1 < rawVerts.length; vi += 2) pts.push([rawVerts[vi], rawVerts[vi+1]])
             if (pts.length >= 2) {
               const isCloud = (a as any).borderEffect?.style === 'C'
-              const isMeasure = typeof a.contents === 'string' && (a.contents.includes(' pt') || a.contents.includes(' mm') || a.contents.includes(' in'))
+              const isMeasure = contents.includes(' pt') || contents.includes(' mm') || contents.includes(' in')
               if (isCloud) {
                 result.push({ ...base, type: 'cloud', points: pts, lineWidth: a.borderStyle?.width ?? 2 } as CloudAnn)
               } else if (isMeasure) {
-                result.push({ ...base, type: 'measure-perimeter', points: pts, lineWidth: a.borderStyle?.width ?? 2, label: a.contents || '', unit: 'pt' } as MeasureAnn)
+                result.push({ ...base, type: 'measure-perimeter', points: pts, lineWidth: a.borderStyle?.width ?? 2, label: contents, unit: 'pt' } as MeasureAnn)
               } else {
                 result.push({ ...base, type: 'polygon', points: pts, lineWidth: a.borderStyle?.width ?? 2 } as PolyAnn)
               }

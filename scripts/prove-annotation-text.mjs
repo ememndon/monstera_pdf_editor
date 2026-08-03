@@ -35,13 +35,13 @@ const tmp = mkdtempSync(join(tmpdir(), 'monstera-anntext-'))
 const entryPath = join(tmp, 'entry.ts')
 const bundlePath = join(tmp, 'bundle.mjs')
 const modPath = join(ROOT, 'src/renderer/utils/annotationPdfLib').replace(/\\/g, '/')
-writeFileSync(entryPath, `export { writeAnnotationsToPdf } from '${modPath}'\n`)
+writeFileSync(entryPath, `export { writeAnnotationsToPdf, readAnnotationsFromPdf } from '${modPath}'\n`)
 const esbuild = await import('esbuild')
 esbuild.buildSync({
   entryPoints: [entryPath], bundle: true, format: 'esm', platform: 'node',
   absWorkingDir: ROOT, outfile: bundlePath,
 })
-const { writeAnnotationsToPdf } = await import(pathToFileURL(bundlePath).href)
+const { writeAnnotationsToPdf, readAnnotationsFromPdf } = await import(pathToFileURL(bundlePath).href)
 const ops = await import(pathToFileURL(join(ROOT, 'dist-electron/main/mupdfOps.js')).href)
 
 // ── a blank white page ───────────────────────────────────────────────────────
@@ -162,6 +162,28 @@ for (const [label, x0, y0, x1, y1] of regions) {
   ok(dns > 0.005, `${label}: ink is present (${(dns * 100).toFixed(1)}%)`)
   ok(dns < 0.40, `${label}: not a solid filled box (${(dns * 100).toFixed(1)}%)`)
 }
+
+// ── round trip: reopen the saved file the way the app does ───────────────────
+// Writing correctly is only half the job. The app reloads annotations through
+// PDF.js, and PDF.js v6 exposes the text as contentsObj.str, not contents.
+// Reading the stale property returned undefined, so every reopened typewriter,
+// text box and sticky note came back EMPTY, and every stamp came back as
+// 'Draft'. That is what the user still saw after the writer was fixed.
+console.log('\n=== round trip: reopen and read back ===')
+const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs')
+const rtDoc = await pdfjs.getDocument({ data: new Uint8Array(final), useSystemFonts: false }).promise
+const readBack = await readAnnotationsFromPdf(rtDoc, 1)
+const allText = readBack.map(r => r.text ?? '').join('|')
+const stampNames = readBack.filter(r => r.type === 'stamp').map(r => r.stampName)
+
+ok(readBack.length >= 7, `all annotations read back (got ${readBack.length})`)
+for (const want of ['TYPEWRITERPROBE', 'TEXTBOXPROBE', 'CALLOUTPROBE']) {
+  ok(allText.includes(want), `"${want}" survives the round trip`)
+}
+for (const want of ['Approved', 'Rejected', 'Today', 'Void']) {
+  ok(stampNames.includes(want), `stamp "${want}" reloads with its own name`)
+}
+ok(!stampNames.includes('Draft'), `no stamp reloads as Draft (got ${stampNames.join(', ') || 'none'})`)
 
 console.log('\n=== RESULT ===')
 if (failures) { console.log(`  FAIL - ${failures} check(s) failed.`); process.exit(1) }
