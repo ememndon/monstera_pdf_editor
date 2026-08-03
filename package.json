@@ -1,6 +1,6 @@
 {
   "name": "monstera-pdf-editor",
-  "version": "2.1.4",
+  "version": "2.1.5",
   "description": "Monstera PDF Editor — a desktop PDF editor by Tenslor Inc.",
   "main": "dist-electron/main/main.js",
   "author": "Tenslor Inc.",
