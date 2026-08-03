@@ -135,6 +135,19 @@ function stdFontVariant(family?: string, bold?: boolean, italic?: boolean): stri
   return bold && italic ? 'Helvetica-BoldOblique' : bold ? 'Helvetica-Bold' : italic ? 'Helvetica-Oblique' : 'Helvetica'
 }
 
+// ── round-trip sidecar ───────────────────────────────────────────────────────
+// PDF.js does not surface several things we write: /CA opacity (for most
+// subtypes), /IT intent, /BE border effect, /CL callout lines, and /NM. Without
+// them a reopened file lost each annotation's opacity and its exact tool
+// identity (typewriter became a text box, a cloud became a polygon, a
+// measurement became a plain line). PDF.js does expose /T, so carry a compact
+// JSON sidecar there and prefer it over guesswork when reading back.
+export const T_PREFIX = 'Monstera '
+
+interface Sidecar { t: string; o?: number; tip?: [number, number]; u?: string; fs?: number }
+
+let pendingSidecar: Sidecar | null = null
+
 function ensureAnnots(doc: PDFDocument, idx: number): PDFArray {
   const page = doc.getPage(idx)
   const key = PDFName.of('Annots')
@@ -148,7 +161,11 @@ function ensureAnnots(doc: PDFDocument, idx: number): PDFArray {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function registerAnnot(doc: PDFDocument, idx: number, dictLiteral: any) {
   const arr = ensureAnnots(doc, idx)
-  const ref = doc.context.register(doc.context.obj(dictLiteral))
+  const dict = { ...dictLiteral }
+  if (pendingSidecar && dict.T === undefined) {
+    dict.T = PDFString.of(T_PREFIX + JSON.stringify(pendingSidecar))
+  }
+  const ref = doc.context.register(doc.context.obj(dict))
   arr.push(ref)
 }
 
@@ -629,6 +646,13 @@ export async function writeAnnotationsToPdf(
 
   for (const ann of annotations) {
     if (ann.pageNum < 1 || ann.pageNum > doc.getPageCount()) continue
+    // Carry the tool identity and everything PDF.js will not hand back.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const anyAnn = ann as any
+    pendingSidecar = { t: ann.type, o: ann.opacity }
+    if (ann.type === 'callout') pendingSidecar.tip = [anyAnn.tipX, anyAnn.tipY]
+    if (typeof anyAnn.unit === 'string') pendingSidecar.u = anyAnn.unit
+    if (typeof anyAnn.fontSize === 'number') pendingSidecar.fs = anyAnn.fontSize
     switch (ann.type) {
       case 'highlight': case 'underline': case 'strikethrough':
         writeHighlight(doc, ann as HighlightAnn); break
@@ -681,6 +705,43 @@ function annContents(a: any): string {
   return typeof s === 'string' ? s : ''
 }
 
+// PDF.js returns quadPoints, vertices and ink paths as Float32Array, and
+// Array.isArray() is FALSE for a typed array. Every guard written that way threw
+// the data away, which silently dropped highlights, underlines, strikethroughs,
+// polygons, polylines and clouds on reopen. Normalise to a plain number[].
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function numArray(v: any): number[] {
+  if (!v) return []
+  if (Array.isArray(v)) return v.map(Number).filter(Number.isFinite)
+  if (ArrayBuffer.isView(v)) return Array.from(v as unknown as ArrayLike<number>)
+  return []
+}
+
+// Pair a flat [x,y,x,y,…] run into points. Also accepts the {x,y} object form
+// older PDF.js used for ink lists.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function toPoints(v: any): Array<[number, number]> {
+  if (Array.isArray(v) && v.length && typeof v[0] === 'object' && v[0] !== null && 'x' in v[0]) {
+    return v.map((p: { x: number; y: number }) => [p.x, p.y] as [number, number])
+  }
+  const flat = numArray(v)
+  const out: Array<[number, number]> = []
+  for (let i = 0; i + 1 < flat.length; i += 2) out.push([flat[i], flat[i + 1]])
+  return out
+}
+
+// Read the /T sidecar we write. Restores the tool identity and the opacity that
+// PDF.js does not report for most subtypes.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function annSidecar(a: any): Sidecar | null {
+  const t = a?.titleObj?.str
+  if (typeof t !== 'string' || !t.startsWith(T_PREFIX)) return null
+  try {
+    const o = JSON.parse(t.slice(T_PREFIX.length))
+    return o && typeof o.t === 'string' ? o as Sidecar : null
+  } catch { return null }
+}
+
 // PDF.js hands colours back as a Uint8ClampedArray indexed [0][1][2], not as
 // {r,g,b}. Reading .r/.g/.b gave undefined, so rgb255ToHex produced the invalid
 // string "#NaNNaNNaN": SVG then dropped the stroke (no stamp border) and fell
@@ -720,7 +781,13 @@ export async function readAnnotationsFromPdf(
         // colour), so fall back to the colour carried in the /DA string.
         const daColor = (a as any).defaultAppearanceData?.fontColor
         const color = annColor(a.color) ?? annColor(daColor) ?? '#ffff00'
-        const opacity = typeof a.opacity === 'number' ? a.opacity : 0.7
+        // PDF.js only reports /CA for a few subtypes (Highlight, Ink); for the
+        // rest it is undefined, so everything used to reload at the 0.7
+        // fallback. Prefer the sidecar, then whatever PDF.js gives, then opaque.
+        const side = annSidecar(a)
+        const opacity = typeof side?.o === 'number' ? side.o
+          : typeof a.opacity === 'number' ? a.opacity
+            : 1
         const base = { id, pageNum, color, opacity, createdAt: Date.now() }
 
         switch (a.subtype) {
@@ -729,7 +796,7 @@ export async function readAnnotationsFromPdf(
           case 'StrikeOut': {
             const type = a.subtype === 'Highlight' ? 'highlight'
               : a.subtype === 'Underline' ? 'underline' : 'strikethrough' as const
-            const rawQ: number[] = Array.isArray(a.quadPoints) ? a.quadPoints : []
+            const rawQ = numArray(a.quadPoints)
             const quads: number[][] = []
             for (let i = 0; i + 7 < rawQ.length; i += 8) quads.push(rawQ.slice(i, i + 8))
             if (quads.length > 0)
@@ -737,8 +804,11 @@ export async function readAnnotationsFromPdf(
             break
           }
           case 'Ink': {
-            const inkLists = (a.inkLists as Array<Array<{x:number;y:number}>> | undefined) || []
-            const paths = inkLists.map(lst => lst.map(p => [p.x, p.y] as [number, number]))
+            // Each list is a flat Float32Array of x,y pairs. Mapping p.x/p.y over
+            // it yielded [undefined, undefined] for every point, so reopened ink
+            // strokes came back with garbage coordinates.
+            const inkLists = (a.inkLists as unknown[] | undefined) || []
+            const paths = inkLists.map(lst => toPoints(lst)).filter(pts => pts.length > 0)
             if (paths.length > 0)
               result.push({ ...base, type: 'ink', paths, lineWidth: a.borderStyle?.width ?? 2 })
             break
@@ -759,22 +829,46 @@ export async function readAnnotationsFromPdf(
             const coords = (a.lineCoordinates as number[] | undefined) || (a.rect as number[])
             const isArrow = Array.isArray(a.lineEndings) &&
               a.lineEndings.some((e: string) => e === 'OpenArrow')
-            result.push({
-              ...base,
-              type: isArrow ? 'arrow' : 'line',
-              x1: coords[0], y1: coords[1], x2: coords[2], y2: coords[3],
-              lineWidth: a.borderStyle?.width ?? 2,
-            })
+            if (side?.t === 'measure-distance') {
+              result.push({
+                ...base, type: 'measure-distance',
+                points: [[coords[0], coords[1]], [coords[2], coords[3]]],
+                label: contents, unit: (side.u ?? 'pt'),
+                lineWidth: a.borderStyle?.width ?? 2,
+              } as unknown as MeasureAnn)
+            } else {
+              result.push({
+                ...base,
+                type: isArrow ? 'arrow' : 'line',
+                x1: coords[0], y1: coords[1], x2: coords[2], y2: coords[3],
+                lineWidth: a.borderStyle?.width ?? 2,
+              })
+            }
             break
           }
           case 'FreeText': {
             const [x1, y1, x2, y2] = a.rect as number[]
-            result.push({
-              ...base, type: 'textbox',
-              x: x1, y: y1, width: x2 - x1, height: y2 - y1,
-              text: contents,
-              fontSize: (a as any).defaultAppearanceData?.fontSize ?? 12,
-            })
+            const fs = side?.fs ?? (a as any).defaultAppearanceData?.fontSize ?? 12
+            // /IT and /CL are not exposed by PDF.js, so a typewriter and a
+            // callout both used to reload as a plain text box. The sidecar keeps
+            // the real tool, and the callout's leader tip with it.
+            if (side?.t === 'typewriter') {
+              result.push({ ...base, type: 'typewriter', x: x1, y: y1, text: contents, fontSize: fs } as TypewriterAnn)
+            } else if (side?.t === 'callout' && side.tip) {
+              result.push({
+                ...base, type: 'callout',
+                x: x1, y: y1, width: x2 - x1, height: y2 - y1,
+                tipX: side.tip[0], tipY: side.tip[1],
+                text: contents, fontSize: fs,
+                lineWidth: a.borderStyle?.width ?? 1,
+              } as CalloutAnn)
+            } else {
+              result.push({
+                ...base, type: 'textbox',
+                x: x1, y: y1, width: x2 - x1, height: y2 - y1,
+                text: contents, fontSize: fs,
+              })
+            }
             break
           }
           case 'Text': {
@@ -803,12 +897,13 @@ export async function readAnnotationsFromPdf(
             break
           }
           case 'Polygon': {
-            const rawVerts: number[] = Array.isArray((a as any).vertices) ? (a as any).vertices : []
-            const pts: Array<[number,number]> = []
-            for (let vi = 0; vi + 1 < rawVerts.length; vi += 2) pts.push([rawVerts[vi], rawVerts[vi+1]])
+            const pts = toPoints((a as any).vertices)
             if (pts.length >= 2) {
-              const isCloud = (a as any).borderEffect?.style === 'C'
-              const isMeasure = contents.includes(' pt') || contents.includes(' mm') || contents.includes(' in')
+              // /BE and /IT are not exposed by PDF.js, so a cloud used to reload
+              // as a plain polygon. The sidecar carries the real tool.
+              const isCloud = side?.t === 'cloud' || (a as any).borderEffect?.style === 'C'
+              const isMeasure = side?.t?.startsWith('measure')
+                || contents.includes(' pt') || contents.includes(' mm') || contents.includes(' in')
               if (isCloud) {
                 result.push({ ...base, type: 'cloud', points: pts, lineWidth: a.borderStyle?.width ?? 2 } as CloudAnn)
               } else if (isMeasure) {
@@ -820,9 +915,7 @@ export async function readAnnotationsFromPdf(
             break
           }
           case 'PolyLine': {
-            const rawVerts: number[] = Array.isArray((a as any).vertices) ? (a as any).vertices : []
-            const pts: Array<[number,number]> = []
-            for (let vi = 0; vi + 1 < rawVerts.length; vi += 2) pts.push([rawVerts[vi], rawVerts[vi+1]])
+            const pts = toPoints((a as any).vertices)
             if (pts.length >= 2)
               result.push({ ...base, type: 'polyline', points: pts, lineWidth: a.borderStyle?.width ?? 2 } as PolyAnn)
             break
