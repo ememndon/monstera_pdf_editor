@@ -1,6 +1,6 @@
 import {
   PDFDocument, PDFTextField, PDFCheckBox, PDFRadioGroup,
-  PDFDropdown, PDFOptionList,
+  PDFDropdown, PDFOptionList, PDFName, PDFString, PDFNumber,
 } from 'pdf-lib'
 import type { PDFDocumentProxy } from 'pdfjs-dist'
 import type {
@@ -77,22 +77,32 @@ export async function readFormFieldsFromPdf(
         } else if (ft === 'Ch') {
           const opts = (a.options as Array<{ exportValue: string; displayValue: string }> | undefined) ?? []
           const optStrings = opts.map(o => o.exportValue || o.displayValue)
+          // PDF.js returns a choice field's value as an ARRAY, even for a single
+          // selection. Reading it as a string fell through to optStrings[0], so
+          // a saved dropdown silently reopened showing the FIRST option instead
+          // of what the user had chosen. That is corruption, not just loss.
           const fv = a.fieldValue
-          if (a.multiSelect) {
-            const values = Array.isArray(fv) ? fv : (fv ? [fv as string] : [])
+          const values: string[] = Array.isArray(fv)
+            ? fv.filter((v): v is string => typeof v === 'string')
+            : typeof fv === 'string' && fv ? [fv] : []
+          // A list box is distinguished from a dropdown by the combo flag, not
+          // by multiSelect: a single-select list box has multiSelect false and
+          // used to be misread as a dropdown.
+          const isCombo = (a as { combo?: boolean }).combo !== false
+          if (isCombo) {
+            result.push({
+              ...base,
+              type: 'dropdown',
+              options: optStrings,
+              value: values[0] ?? '',
+            } as DropdownFormField)
+          } else {
             result.push({
               ...base,
               type: 'listbox',
               options: optStrings,
               values,
             } as ListBoxFormField)
-          } else {
-            result.push({
-              ...base,
-              type: 'dropdown',
-              options: optStrings,
-              value: typeof fv === 'string' ? fv : (optStrings[0] ?? ''),
-            } as DropdownFormField)
           }
 
         } else if (ft === 'Sig') {
@@ -187,6 +197,11 @@ export async function writeFormToBytes(
       if (field.type === 'text') {
         const tf = form.createTextField(name)
         if (field.multiline) tf.enableMultiline()
+        // maxLen was accepted from the UI but never written, so a length limit
+        // was silently dropped and came back as 0 on reopen.
+        if (typeof field.maxLen === 'number' && field.maxLen > 0) {
+          try { tf.setMaxLength(field.maxLen) } catch { /* ignore */ }
+        }
         tf.addToPage(page, { x, y, width, height, borderWidth: 1 })
         if (field.value) tf.setText(field.value)
       } else if (field.type === 'date') {
@@ -218,23 +233,54 @@ export async function writeFormToBytes(
         const ol = form.createOptionList(name)
         if (lf.options.length > 0) {
           ol.addOptions(lf.options)
+          // Without this the list box is written as a plain choice field, which
+          // reopens as a dropdown and loses every selection past the first.
+          if (lf.values.length > 1) { try { ol.enableMultiselect() } catch {} }
           ol.addToPage(page, { x, y, width, height, borderWidth: 1 })
-          if (lf.values.length > 0) { try { ol.select(lf.values[0]) } catch {} }
+          if (lf.values.length > 0) { try { ol.select(lf.values) } catch {} }
         }
       } else if (field.type === 'radio') {
         const rf = field as RadioFormField & { isNew: true }
-        const grp = form.createRadioGroup(rf.groupName || name)
-        grp.addOptionToPage(rf.exportValue || 'Yes', page, { x, y, width: Math.min(width, height), height: Math.min(width, height), borderWidth: 1 })
+        const groupName = rf.groupName || name
+        // createRadioGroup() throws if the group already exists, and the throw
+        // was swallowed, so only the FIRST button of a group was ever written
+        // and the rest of the group silently vanished.
+        const existingGrp = form.getFieldMaybe(groupName)
+        const grp = existingGrp instanceof PDFRadioGroup
+          ? existingGrp
+          : form.createRadioGroup(groupName)
+        const sz = Math.min(width, height)
+        grp.addOptionToPage(rf.exportValue || 'Yes', page, { x, y, width: sz, height: sz, borderWidth: 1 })
         if (rf.selected) { try { grp.select(rf.exportValue) } catch {} }
       } else if (field.type === 'signature') {
-        // Signature as a text field with visual distinction
-        const tf = form.createTextField(name)
-        tf.addToPage(page, { x, y, width, height, borderWidth: 1 })
+        // pdf-lib has no signature-field API, and the old stand-in text field
+        // meant a signature area reopened as an editable text box. Build the
+        // /FT /Sig widget directly so the field keeps its type.
+        const sigRef = doc.context.register(doc.context.obj({
+          Type: PDFName.of('Annot'),
+          Subtype: PDFName.of('Widget'),
+          FT: PDFName.of('Sig'),
+          T: PDFString.of(name),
+          Rect: doc.context.obj([x, y, x + width, y + height]),
+          F: PDFNumber.of(4),
+          P: page.ref,
+        }))
+        page.node.addAnnot(sigRef)
+        form.acroForm.addField(sigRef)
       } else if (field.type === 'checkbox') {
         const sz = Math.min(width, height)
         const cf = form.createCheckBox(name)
         cf.addToPage(page, { x, y, width: sz, height: sz, borderWidth: 1 })
         if ((field as CheckboxFormField).checked) cf.check()
+      }
+
+      // readOnly was carried on every field but never applied, so a locked
+      // field reopened fully editable.
+      if (field.readOnly) {
+        try {
+          const created = form.getFieldMaybe(name)
+          ;(created as { enableReadOnly?: () => void } | undefined)?.enableReadOnly?.()
+        } catch { /* not all field kinds expose it */ }
       }
     } catch { /* field name conflict or page out of range */ }
   }
