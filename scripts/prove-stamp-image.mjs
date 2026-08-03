@@ -175,8 +175,11 @@ ok(!stampNames.includes('/Draft'), 'no /Draft stamp annotation emitted')
 ok(!stampNames.includes('/NotApproved'), 'no /NotApproved stamp annotation emitted for the Custom image stamp')
 
 console.log('\n=== Case B: plain named stamp still works ===')
-ok(stampNames.includes('/Approved'), 'the plain Approved stamp still writes its /Stamp annotation')
 ok(stampNames.length === 1, `exactly one stamp annotation remains (found ${stampNames.length}: ${stampNames.join(', ')})`)
+// The label is drawn by our own /AP now. Deliberately NO /Name: leaving one lets
+// the viewer substitute its built-in artwork, which is what turned every
+// unmapped stamp into "DRAFT". prove-annotation-text.mjs asserts the label text.
+ok(stampNames[0] === '(none)', 'the remaining stamp carries no /Name for a viewer to reinterpret')
 
 console.log('\n=== RESULT ===')
 if (failures) { console.log(`  FAIL - ${failures} check(s) failed.`); process.exit(1) }

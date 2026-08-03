@@ -24,6 +24,107 @@ function daFont(font?: string): string {
   return (font === 'Times-Roman' || font === 'Courier') ? font : 'Helvetica'
 }
 
+// ── appearance streams for text-bearing annotations ──────────────────────────
+// pdf-lib writes bare annotation dictionaries. For anything that shows text that
+// is not enough, and it fails in two ways at once:
+//   * /C on a FreeText is the BACKGROUND colour, not the text colour. Passing the
+//     user's text colour there painted a solid filled box over the page.
+//   * a /DA font name only resolves if that name exists in the AcroForm /DR
+//     resource dictionary, which we never wrote, so the text could not be laid
+//     out at all and was silently dropped.
+// The result was a coloured rectangle with no text. Building the /AP ourselves
+// makes the annotation render identically in every viewer, and MuPDF's synthesis
+// pass deliberately skips annotations that already carry an appearance.
+
+type FontGetter = (family?: string, bold?: boolean) => Promise<PDFFont>
+
+function boldVariant(base: string): string {
+  if (base === 'Times-Roman') return 'Times-Bold'
+  if (base === 'Courier') return 'Courier-Bold'
+  return 'Helvetica-Bold'
+}
+
+function makeFontGetter(doc: PDFDocument): FontGetter {
+  const cache = new Map<string, PDFFont>()
+  return async (family, bold) => {
+    const name = bold ? boldVariant(daFont(family)) : daFont(family)
+    let f = cache.get(name)
+    if (!f) { f = await doc.embedFont(name as StandardFonts); cache.set(name, f) }
+    return f
+  }
+}
+
+// Escape a PDF literal string used inside a content stream.
+const escPdf = (s: string) => s.replace(/\\/g, '\\\\').replace(/\(/g, '\\(').replace(/\)/g, '\\)')
+
+// A /DA that carries the text colour too, so a viewer that re-synthesizes the
+// appearance after an edit still gets the right colour and size.
+function daString(hex: string, font: string | undefined, size: number): string {
+  const [r, g, b] = hexToRgb01(hex)
+  return `${r} ${g} ${b} rg /${daFont(font)} ${size} Tf`
+}
+
+// Break text into lines. maxWidth <= 0 means "do not wrap", honouring only the
+// newlines the user typed.
+function wrapText(text: string, font: PDFFont, size: number, maxWidth: number): string[] {
+  const out: string[] = []
+  for (const para of text.split(/\r?\n/)) {
+    if (!para) { out.push(''); continue }
+    if (maxWidth <= 0) { out.push(para); continue }
+    let line = ''
+    for (const word of para.split(/(\s+)/)) {
+      const next = line + word
+      if (line && font.widthOfTextAtSize(next, size) > maxWidth) {
+        out.push(line.trimEnd())
+        line = word.trimStart()
+      } else line = next
+    }
+    out.push(line.trimEnd())
+  }
+  return out
+}
+
+// Register a Form XObject holding `ops` and return the /AP dictionary for it.
+function apDict(doc: PDFDocument, width: number, height: number, font: PDFFont, ops: string) {
+  const stream = doc.context.flateStream(`q\n${ops}Q\n`, {
+    Type: PDFName.of('XObject'),
+    Subtype: PDFName.of('Form'),
+    FormType: PDFNumber.of(1),
+    BBox: doc.context.obj([0, 0, width, height]),
+    Resources: doc.context.obj({ Font: doc.context.obj({ F1: font.ref }) }),
+  })
+  return doc.context.obj({ N: doc.context.register(stream) })
+}
+
+// Text laid out top-down inside a box whose origin is the BBox corner.
+function textOps(
+  lines: string[], font: PDFFont, size: number, hex: string,
+  boxH: number, pad: number, align: 'left' | 'center' = 'left', boxW = 0,
+): string {
+  const [r, g, b] = hexToRgb01(hex)
+  const leading = size * 1.15
+  let y = boxH - pad - size * 0.85
+  let out = `BT\n/F1 ${size} Tf\n${r} ${g} ${b} rg\n`
+  for (const line of lines) {
+    if (line) {
+      const x = align === 'center'
+        ? Math.max(0, (boxW - font.widthOfTextAtSize(line, size)) / 2)
+        : pad
+      out += `1 0 0 1 ${x.toFixed(2)} ${y.toFixed(2)} Tm\n(${escPdf(line)}) Tj\n`
+    }
+    y -= leading
+  }
+  return out + 'ET\n'
+}
+
+// Stroked rectangle inset by half the line width so the stroke stays inside BBox.
+function borderOps(hex: string, lw: number, w: number, h: number): string {
+  if (lw <= 0) return ''
+  const [r, g, b] = hexToRgb01(hex)
+  const i = lw / 2
+  return `${r} ${g} ${b} RG\n${lw} w\n${i} ${i} ${(w - lw).toFixed(2)} ${(h - lw).toFixed(2)} re\nS\n`
+}
+
 // Pick the base-14 variant (regular/bold/italic/bold-italic) of a family so a
 // cover-and-replace text edit can match the original weight/slant when baked.
 function stdFontVariant(family?: string, bold?: boolean, italic?: boolean): string {
@@ -126,18 +227,26 @@ function writeShape(doc: PDFDocument, a: ShapeAnn) {
   registerAnnot(doc, a.pageNum - 1, base)
 }
 
-function writeTextBox(doc: PDFDocument, a: TextBoxAnn) {
+async function writeTextBox(doc: PDFDocument, a: TextBoxAnn, getFont: FontGetter) {
+  const font = await getFont(a.font)
+  const size = a.fontSize
+  const pad = 4
+  const lines = wrapText(sanitizeForStandardFont(a.text ?? ''), font, size, a.width - pad * 2)
+  // No /C and no border: on screen the box chrome is a near-invisible editing
+  // affordance, so painting a filled or outlined box here would put something in
+  // the saved file that the user never saw.
   registerAnnot(doc, a.pageNum - 1, {
     Type: PDFName.of('Annot'),
     Subtype: PDFName.of('FreeText'),
     Rect: doc.context.obj([a.x, a.y, a.x + a.width, a.y + a.height]),
     Contents: PDFString.of(a.text),
-    DA: PDFString.of(`/${daFont(a.font)} ${a.fontSize} Tf`),
-    BS: doc.context.obj({ W: PDFNumber.of(1) }),
-    C: mkC(doc, a.color),
+    DA: PDFString.of(daString(a.color, a.font, size)),
+    BS: doc.context.obj({ W: PDFNumber.of(0) }),
     CA: PDFNumber.of(a.opacity),
     NM: PDFString.of(NM_PREFIX + a.id),
     F: PDFNumber.of(4),
+    AP: apDict(doc, a.width, a.height, font,
+      textOps(lines, font, size, a.color, a.height, pad)),
   })
 }
 
@@ -170,19 +279,31 @@ function writeRedact(doc: PDFDocument, a: RedactAnn) {
   })
 }
 
-function writeTypewriter(doc: PDFDocument, a: TypewriterAnn) {
-  // Typewriter saves as FreeText with transparent background (no border, no fill)
+async function writeTypewriter(doc: PDFDocument, a: TypewriterAnn, getFont: FontGetter) {
+  // Typewriter is bare text: transparent background, no border. The old code set
+  // /C to the text colour, which a FreeText reads as its background fill, so the
+  // saved page showed a solid rectangle instead of the typed words.
+  const font = await getFont(a.font)
+  const size = a.fontSize
+  const pad = 2
+  const lines = wrapText(sanitizeForStandardFont(a.text ?? ''), font, size, 0)
+  const width = Math.max(4, ...lines.map(l => font.widthOfTextAtSize(l, size))) + pad * 2
+  const height = Math.max(1, lines.length) * size * 1.15 + pad * 2
+  // The overlay anchors the text block's TOP at y + fontSize * 1.5; mirror that
+  // so the saved position matches what was on screen.
+  const top = a.y + size * 1.5
   registerAnnot(doc, a.pageNum - 1, {
     Type: PDFName.of('Annot'),
     Subtype: PDFName.of('FreeText'),
-    Rect: doc.context.obj([a.x, a.y, a.x + 400, a.y + a.fontSize * 2]),
+    Rect: doc.context.obj([a.x, top - height, a.x + width, top]),
     Contents: PDFString.of(a.text),
-    DA: PDFString.of(`/${daFont(a.font)} ${a.fontSize} Tf`),
+    DA: PDFString.of(daString(a.color, a.font, size)),
     BS: doc.context.obj({ W: PDFNumber.of(0) }),
-    C: mkC(doc, a.color),
     CA: PDFNumber.of(a.opacity),
     NM: PDFString.of(NM_PREFIX + a.id),
     F: PDFNumber.of(4),
+    AP: apDict(doc, width, height, font,
+      textOps(lines, font, size, a.color, height, pad)),
   })
 }
 
@@ -237,42 +358,72 @@ async function writeTextEdit(doc: PDFDocument, a: TextEditAnn, fontCache: Map<st
   } catch { /* unencodable text — leave the white cover so the original stays hidden */ }
 }
 
-function writeStamp(doc: PDFDocument, a: StampAnn) {
-  const nameMap: Record<string, string> = {
-    Approved: 'Approved', Draft: 'Draft', Confidential: 'Confidential',
-    Rejected: 'Rejected', Custom: 'NotApproved',
-  }
+async function writeStamp(doc: PDFDocument, a: StampAnn, getFont: FontGetter) {
+  // Previously this wrote only a /Name drawn from a five-entry map, so every
+  // other stamp (Today, Received, Revised, Void, For Review, any custom label)
+  // fell through to 'Draft' and the viewer painted its built-in DRAFT artwork.
+  // Draw the real label ourselves instead, which works for any name.
+  const font = await getFont(undefined, true)
+  const w = a.width, h = a.height
+  const size = Math.min(h * 0.6, 18)
+  const label = sanitizeForStandardFont(String(a.stampName ?? '').toUpperCase())
+  const lw = 2
+  // Vertically centre the cap-height rather than the full line box.
+  const ops = borderOps(a.color, lw, w, h)
+    + textOps([label], font, size, a.color, h, 0, 'center', w).replace(
+        /1 0 0 1 ([\d.]+) [\d.]+ Tm/,
+        (_m, x) => `1 0 0 1 ${x} ${((h - size * 0.7) / 2).toFixed(2)} Tm`)
   registerAnnot(doc, a.pageNum - 1, {
     Type: PDFName.of('Annot'),
     Subtype: PDFName.of('Stamp'),
-    Rect: doc.context.obj([
-      a.x - a.width / 2, a.y - a.height / 2,
-      a.x + a.width / 2, a.y + a.height / 2,
-    ]),
-    Name: PDFName.of(nameMap[a.stampName] || 'Draft'),
+    Rect: doc.context.obj([a.x - w / 2, a.y - h / 2, a.x + w / 2, a.y + h / 2]),
     C: mkC(doc, a.color),
     CA: PDFNumber.of(a.opacity),
-    Contents: PDFString.of(a.stampName),
+    Contents: PDFString.of(String(a.stampName ?? '')),
     NM: PDFString.of(NM_PREFIX + a.id),
     F: PDFNumber.of(4),
+    AP: apDict(doc, w, h, font, ops),
   })
 }
 
-function writeCallout(doc: PDFDocument, a: CalloutAnn) {
+async function writeCallout(doc: PDFDocument, a: CalloutAnn, getFont: FontGetter) {
   const x2 = a.x + a.width, y2 = a.y + a.height
+  const font = await getFont(a.font)
+  const size = a.fontSize
+  const pad = 4
+  const lines = wrapText(sanitizeForStandardFont(a.text ?? ''), font, size, a.width - pad * 2)
+
+  // The appearance box has to contain the leader tip as well as the text box,
+  // otherwise the line would be clipped away.
+  const rx0 = Math.min(a.x, a.tipX), ry0 = Math.min(a.y, a.tipY)
+  const rx1 = Math.max(x2, a.tipX), ry1 = Math.max(y2, a.tipY)
+  const apW = Math.max(1, rx1 - rx0), apH = Math.max(1, ry1 - ry0)
+  const [lr, lg, lb] = hexToRgb01(a.color)
+  const lw = Math.max(a.lineWidth, 1)
+
+  const leader =
+    `${lr} ${lg} ${lb} RG\n${lw} w\n` +
+    `${(a.tipX - rx0).toFixed(2)} ${(a.tipY - ry0).toFixed(2)} m\n` +
+    `${(a.x - rx0).toFixed(2)} ${(((a.y + y2) / 2) - ry0).toFixed(2)} l\nS\n`
+  const box =
+    `q\n1 0 0 1 ${(a.x - rx0).toFixed(2)} ${(a.y - ry0).toFixed(2)} cm\n` +
+    borderOps(a.color, lw, a.width, a.height) +
+    textOps(lines, font, size, a.color, a.height, pad) +
+    `Q\n`
+
   registerAnnot(doc, a.pageNum - 1, {
     Type: PDFName.of('Annot'),
     Subtype: PDFName.of('FreeText'),
-    Rect: doc.context.obj([a.x, a.y, x2, y2]),
+    Rect: doc.context.obj([rx0, ry0, rx1, ry1]),
     Contents: PDFString.of(a.text),
-    DA: PDFString.of(`/${daFont(a.font)} ${a.fontSize} Tf`),
+    DA: PDFString.of(daString(a.color, a.font, size)),
     BS: doc.context.obj({ W: PDFNumber.of(a.lineWidth) }),
-    C: mkC(doc, a.color),
     CA: PDFNumber.of(a.opacity),
     CL: doc.context.obj([a.tipX, a.tipY, a.x, (a.y + y2) / 2]),
     IT: PDFName.of('FreeTextCallout'),
     NM: PDFString.of(NM_PREFIX + a.id),
     F: PDFNumber.of(4),
+    AP: apDict(doc, apW, apH, font, leader + box),
   })
 }
 
@@ -468,6 +619,7 @@ export async function writeAnnotationsToPdf(
 
   // Edit-text replacements are baked into the content stream too (cover + new
   // text in the original font); fonts are embedded once and reused per program.
+  const getFont = makeFontGetter(doc)
   const textEditFontCache = new Map<string, PDFFont>()
   for (const ann of annotations) {
     if (ann.type !== 'text-edit') continue
@@ -485,23 +637,23 @@ export async function writeAnnotationsToPdf(
       case 'rectangle': case 'ellipse': case 'line': case 'arrow':
         writeShape(doc, ann as ShapeAnn); break
       case 'textbox':
-        writeTextBox(doc, ann as TextBoxAnn); break
+        await writeTextBox(doc, ann as TextBoxAnn, getFont); break
       case 'stickynote':
         writeStickyNote(doc, ann as StickyNoteAnn); break
       case 'stamp':
         // Image stamps are baked into the content stream above. Writing a
         // name-based annotation for them too would make the viewer paint its
         // own stamp artwork on top of the picture.
-        if (!(ann as StampAnn).imageDataUrl) writeStamp(doc, ann as StampAnn)
+        if (!(ann as StampAnn).imageDataUrl) await writeStamp(doc, ann as StampAnn, getFont)
         break
       case 'redact':
         writeRedact(doc, ann as RedactAnn); break
       case 'typewriter':
-        writeTypewriter(doc, ann as TypewriterAnn); break
+        await writeTypewriter(doc, ann as TypewriterAnn, getFont); break
       case 'text-edit':
         break  // baked into the content stream above
       case 'callout':
-        writeCallout(doc, ann as CalloutAnn); break
+        await writeCallout(doc, ann as CalloutAnn, getFont); break
       case 'cloud':
         writeCloud(doc, ann as CloudAnn); break
       case 'polygon': case 'polyline':
