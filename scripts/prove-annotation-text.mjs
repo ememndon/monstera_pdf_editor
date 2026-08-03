@@ -173,7 +173,8 @@ console.log('\n=== round trip: reopen and read back ===')
 const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs')
 const rtDoc = await pdfjs.getDocument({ data: new Uint8Array(final), useSystemFonts: false }).promise
 const readBack = await readAnnotationsFromPdf(rtDoc, 1)
-const allText = readBack.map(r => r.text ?? '').join('|')
+const allTextOf = r => r.text ?? ''
+const allText = readBack.map(allTextOf).join('|')
 const stampNames = readBack.filter(r => r.type === 'stamp').map(r => r.stampName)
 
 ok(readBack.length >= 7, `all annotations read back (got ${readBack.length})`)
@@ -184,6 +185,19 @@ for (const want of ['Approved', 'Rejected', 'Today', 'Void']) {
   ok(stampNames.includes(want), `stamp "${want}" reloads with its own name`)
 }
 ok(!stampNames.includes('Draft'), `no stamp reloads as Draft (got ${stampNames.join(', ') || 'none'})`)
+
+// PDF.js returns colours as a Uint8ClampedArray indexed [0][1][2], not {r,g,b}.
+// Reading .r/.g/.b yielded "#NaNNaNNaN", an invalid colour, so the stamp border
+// disappeared and its text fell back to black on reopen.
+const colorOf = name => readBack.find(r => r.type === 'stamp' && r.stampName === name)?.color
+for (const [name, want] of [['Approved', '#008000'], ['Rejected', '#ff0000'], ['Today', '#0000ff'], ['Void', '#ff00ff']]) {
+  const got = colorOf(name)
+  ok(got === want, `stamp "${name}" keeps its colour (want ${want}, got ${got})`)
+}
+ok(readBack.every(r => !String(r.color).includes('NaN')),
+  'no annotation reloads with an invalid colour')
+const twColor = readBack.find(r => allTextOf(r) === 'TYPEWRITERPROBE')?.color
+ok(twColor === '#000000', `typewriter keeps its text colour (want #000000, got ${twColor})`)
 
 console.log('\n=== RESULT ===')
 if (failures) { console.log(`  FAIL - ${failures} check(s) failed.`); process.exit(1) }

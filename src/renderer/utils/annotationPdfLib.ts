@@ -681,6 +681,18 @@ function annContents(a: any): string {
   return typeof s === 'string' ? s : ''
 }
 
+// PDF.js hands colours back as a Uint8ClampedArray indexed [0][1][2], not as
+// {r,g,b}. Reading .r/.g/.b gave undefined, so rgb255ToHex produced the invalid
+// string "#NaNNaNNaN": SVG then dropped the stroke (no stamp border) and fell
+// back to black text, which looked exactly like "the colour was lost on save".
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function annColor(c: any): string | null {
+  if (!c) return null
+  const r = c[0] ?? c.r, g = c[1] ?? c.g, b = c[2] ?? c.b
+  if (![r, g, b].every(v => typeof v === 'number' && Number.isFinite(v))) return null
+  return rgb255ToHex(r, g, b)
+}
+
 export async function readAnnotationsFromPdf(
   pdfDoc: PDFDocumentProxy,
   numPages: number
@@ -707,11 +719,7 @@ export async function readAnnotationsFromPdf(
         // /C is absent on our FreeText (it means background fill, not text
         // colour), so fall back to the colour carried in the /DA string.
         const daColor = (a as any).defaultAppearanceData?.fontColor
-        const color = a.color
-          ? rgb255ToHex(a.color.r, a.color.g, a.color.b)
-          : daColor
-            ? rgb255ToHex(daColor[0], daColor[1], daColor[2])
-            : '#ffff00'
+        const color = annColor(a.color) ?? annColor(daColor) ?? '#ffff00'
         const opacity = typeof a.opacity === 'number' ? a.opacity : 0.7
         const base = { id, pageNum, color, opacity, createdAt: Date.now() }
 
