@@ -429,21 +429,40 @@ export async function writeAnnotationsToPdf(
   doc.registerFontkit(fontkit)
   clearAll(doc)
 
-  // Placed images go into the content stream (not annotation array)
+  // Placed images AND image-bearing stamps (drawn/uploaded/typed signatures and
+  // custom image stamps) go into the content stream, not the annotation array.
+  // A /Stamp annotation that carries only a /Name has no artwork of its own, so
+  // the viewer (or MuPDF's appearance synthesis) draws its built-in stamp for
+  // that name instead. That is why a saved signature came back as "DRAFT".
   for (const ann of annotations) {
-    if (ann.type !== 'placed-image') continue
     if (ann.pageNum < 1 || ann.pageNum > doc.getPageCount()) continue
-    const a = ann as PlacedImageAnn
-    const { bytes: imgBytes, mime } = dataUrlToBytes(a.dataUrl)
+
+    let img: { url: string; x: number; y: number; width: number; height: number } | null = null
+    if (ann.type === 'placed-image') {
+      const a = ann as PlacedImageAnn
+      img = { url: a.dataUrl, x: a.x, y: a.y, width: a.width, height: a.height }
+    } else if (ann.type === 'stamp' && (ann as StampAnn).imageDataUrl) {
+      const a = ann as StampAnn
+      // StampAnn x/y is the centre of the stamp; drawImage takes bottom-left.
+      img = {
+        url: a.imageDataUrl as string,
+        x: a.x - a.width / 2,
+        y: a.y - a.height / 2,
+        width: a.width,
+        height: a.height,
+      }
+    }
+    if (!img) continue
+
+    const { bytes: imgBytes, mime } = dataUrlToBytes(img.url)
     const embeddedImg = mime === 'image/png'
       ? await doc.embedPng(imgBytes)
       : await doc.embedJpg(imgBytes)
-    const page = doc.getPage(a.pageNum - 1)
-    page.drawImage(embeddedImg, {
-      x: a.x,
-      y: a.y,
-      width: a.width,
-      height: a.height,
+    doc.getPage(ann.pageNum - 1).drawImage(embeddedImg, {
+      x: img.x,
+      y: img.y,
+      width: img.width,
+      height: img.height,
     })
   }
 
@@ -470,7 +489,11 @@ export async function writeAnnotationsToPdf(
       case 'stickynote':
         writeStickyNote(doc, ann as StickyNoteAnn); break
       case 'stamp':
-        writeStamp(doc, ann as StampAnn); break
+        // Image stamps are baked into the content stream above. Writing a
+        // name-based annotation for them too would make the viewer paint its
+        // own stamp artwork on top of the picture.
+        if (!(ann as StampAnn).imageDataUrl) writeStamp(doc, ann as StampAnn)
+        break
       case 'redact':
         writeRedact(doc, ann as RedactAnn); break
       case 'typewriter':
